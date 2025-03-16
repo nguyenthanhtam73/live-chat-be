@@ -54,31 +54,47 @@ async function uploadFileToS3(file) {
   return Location;
 }
 
-// API gửi tin nhắn có file
+// API gửi tin nhắn có file (không bắt buộc file)
 app.post('/send-message', upload.single('file'), async (req, res) => {
-  const { senderId, receiverId, message } = req.body;
-  let fileId = null;
+  try {
+    const { senderId, receiverId, message } = req.body;
+    let fileId = null;
 
-  if (req.file) {
-    const fileUrl = await uploadFileToS3(req.file);
-    const [result] = await db.query(
-      'INSERT INTO files (file_url, file_type) VALUES (?, ?)',
-      [fileUrl, req.file.mimetype]
+    // Check senderId và receiverId có tồn tại trong bảng users không
+    const [sender] = await db.query('SELECT id FROM users WHERE id = ?', [senderId]);
+    const [receiver] = await db.query('SELECT id FROM users WHERE id = ?', [receiverId]);
+    if (!sender.length || !receiver.length) {
+      return res.status(400).send('Sender or receiver does not exist');
+    }
+
+    // Nếu có file, upload lên S3 và lưu vào bảng files
+    if (req.file) {
+      const fileUrl = await uploadFileToS3(req.file);
+      const [result] = await db.query(
+        'INSERT INTO files (file_url, file_type) VALUES (?, ?)',
+        [fileUrl, req.file.mimetype]
+      );
+      fileId = result.insertId;
+    }
+
+    // Insert tin nhắn, file_id có thể là NULL nếu không có file
+    const [msgResult] = await db.query(
+      'INSERT INTO messages (sender_id, receiver_id, message, file_id) VALUES (?, ?, ?, ?)',
+      [senderId, receiverId, message || '', fileId]
     );
-    fileId = result.insertId;
+
+    // Lấy tin nhắn vừa gửi để trả về real-time
+    const [newMsg] = await db.query(
+      'SELECT m.*, f.file_url FROM messages m LEFT JOIN files f ON m.file_id = f.id WHERE m.id = ?',
+      [msgResult.insertId]
+    );
+
+    io.emit('chat message', newMsg[0]); // Gửi real-time qua Socket.IO
+    res.status(200).send('Message sent');
+  } catch (err) {
+    console.error('Error in /send-message:', err.message);
+    res.status(500).send('Server error');
   }
-
-  const [msgResult] = await db.query(
-    'INSERT INTO messages (sender_id, receiver_id, message, file_id) VALUES (?, ?, ?, ?)',
-    [senderId, receiverId, message || '', fileId]
-  );
-
-  const [newMsg] = await db.query(
-    'SELECT m.*, f.file_url FROM messages m LEFT JOIN files f ON m.file_id = f.id WHERE m.id = ?',
-    [msgResult.insertId]
-  );
-  io.emit('chat message', newMsg[0]); // Gửi real-time
-  res.send('Message sent');
 });
 
 // API lấy tin nhắn
